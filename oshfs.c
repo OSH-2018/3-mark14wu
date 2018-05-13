@@ -30,56 +30,143 @@ static struct filenode *root = NULL;
 
 // malloc and realloc -------------------
 
-// 对齐部分，按照8字节为最小单位对齐（取double的长度）
-// 这里巧妙地运用了 C 语言中 union 的语言特性来对齐
-typedef double Align;
+struct{
+    struct _header *next;  // next idle block
+    int start;
+    int size;
+    void* content;
+}_header;
 
-union header{
-    struct{
-        union header *ptr;  // next idle block
-        unsigned size;
-    }s;
-    Align x;
-};
+typedef struct _header Header;
 
-typedef union header Header;
+printf("sizeof header is %d", sizeof(Header));
 
-static Header base;     // 链表头
+// 使用 块 1 (block 1) 来存放其余文件的块指针
+// block 1 is from 4096 to 8191
+
+static int header_used[blocksize];
+memset(header_used, 0, sizeof(header_used));
+
+Header *header_malloc(){
+    
+    static Header *freep = (Header*)(mem + blocksize);
+    Header *p;
+    for (p = freep; p <= (Header*)(mem + 2 * blocksize - 1 - sizeof(Header)); p++){
+        if (!*(header_used + (void*)p - (mem + blocksize))){
+            freep = p+1;
+            *(header_used + (void*)p - (mem + blocksize)) = 1;
+            return p;
+        }
+    }
+    for(p = (Header*)(mem + blocksize); p <= freep - 1; p++){
+        if (!*(header_used + (void*)p - (mem + blocksize))){
+            freep = p+1;
+            *(header_used + (void*)p - (mem + blocksize)) = 1;
+            return p;
+        }
+    }
+    fprintf(stderr, "block 1 is full!\n");
+    return NULL;
+}
+
+void header_free(Header* bp){
+    header_used[(void*)bp - (mem + blocksize)] = 0;
+    memset(bp, 0, sizeof(Header));
+}
+
+
+static Header *base = header_malloc();     // 链表头
 static Header *freep = NULL;        // 空闲块开头
 
-void *my_malloc(size_t nbytes){
+Header *block_malloc(size_t nbytes){
     Header *p, *prevp;
     Header *my_morecore(size_t);
     unsigned nunits;
 
-    nunits = (nbytes+sizeof(Header)-1)/sizeof(Header) + 1;  // 向上取整，以满足对齐要求
+    nblocks = (nbytes - 1) / blocksize + 1;  // 向上取整，以满足对齐要求
     if ((prevp = freep) == NULL) {              // 初始化空闲块
-        base.s.ptr = freep = prevp = &base;
-        base.s.size = 0;
+        base->next = freep = prevp = &base;
+        base->start = 0;
+        base->size = blocknr;
     }
     // 这里采用了“首次分配”的分配策略
-    for (p = prevp->s.ptr; ; prevp = p, p = p->s.ptr) {         // 遍历空闲块链表
-        if (p->s.size >= nunits) {          // 空闲块足够大时
-            if (p->s.size == nunits)        // 刚好一样大时
-                prevp->s.ptr = p->s.ptr;
+    // 为了方便分块存储，顺便找出剩余空闲块中的最大值
+    Header *max_block = header_malloc();
+    max_block->size = 0;
+    for (p = prevp->next; ; prevp = p, p = p->next) {         // 遍历空闲块链表
+        if (p->size > max_block->size)
+            max_block = p;
+        if (p->size * blocksize >= nunits) {          // 空闲块足够大时
+            if (p->size * blocksize == nunits){        // 刚好一样大时
+                prevp->next = p->next;
+                p->next = NULL;
+                p->content = mmap(NULL, p->size * blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                memset(p->content, 0, p->size * blocksize);
+                return p;
+            }
             else {
                 // 将该块切为两块，将尾部的新块分配出去
-                p->s.size -= nunits;
-                p += p->s.size;
-                p->s.size = nunits;
+                p->size -= nblocks;
+                Header *q = header_malloc();
+                q->start = p->start + p->size;
+                q->size = nblocks;
             }
             freep = prevp;
-            return (void *)(p+1);
+            q->next = NULL;
+            q->content = mmap(NULL, q->size * blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            memset(q->content, 0, q->size * blocksize);
+            return q;
         }
-        if (p == freep) /* wrapped around free list */
-            if ((p = my_morecore(nunits)) == NULL)
-                return NULL;
-    /* none left */
+        if (p == freep){ // 没有足够大的单独空闲块，必须分块存储
+            p = max_block;
+            if (max_block == 0){
+                fprintf(stderr, "Not enough blocks!\n");
+                return 255;
+            }
+            p->content = mmap(NULL, p->size * blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            memset(p->content, 0, p->size * blocksize);
+            p->next = block_malloc(nbytes - (size_t)max_block->size * blocksize);
+        }
     }
 }
 
-Header  *my_morecore(size_t nu){
-    return NULL;
+void block_free(header *bp){
+
+    Header *p;
+
+    if (bp->next != NULL){
+        block_free(bp->next);
+        bp->next = NULL;
+    }
+
+    // 释放掉 bp 占用的内存映射
+    munmap(bp, bp->size * blocksize);
+
+    // 将 bp 插入到 p 和 p->next 之间
+    for (p = freep; !(bp > p && bp < p->next); p = p->next)
+        if(p >= p->next && (bp > p || bp < p->next))
+            break;  // 特判，当 p 和 p->next 包含区间的末尾
+
+    // 将 bp 与 p->next 相连接
+    // 如果 bp 和 p->next 能合并
+    if (bp + bp->size == p->next){
+        bp->size += p->next->size;
+        bp->next = p->next->next;
+        header_free(p->next);
+    }
+    else    // 不能合并
+        bp->next = p->next;
+
+    // 将 p 与 bp 相连接
+    // 如果 p 与 bp 能够合并
+    if(p + p->size == bp){
+        p->size += bp->size;
+        p->next = bp->next;
+        header_free(bp);
+    }
+    else
+        p->next = bp;
+    freep = p;
 }
 // malloc and realloc finished ----------
 
@@ -111,8 +198,7 @@ static void *oshfs_init(struct fuse_conn_info *conn)
 {
     // size_t blocknr = sizeof(mem) / sizeof(mem[0]);
     // size_t blocksize = size / blocknr;
-    size_t blocksize = 4096;
-    size_t blocknr = size / blocksize;
+
     // Demo 1
     for(int i = 0; i < blocknr; i++) {
         mem[i] = mmap(NULL, blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
