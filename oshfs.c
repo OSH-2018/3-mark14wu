@@ -1,11 +1,4 @@
-/*
- * Copyright © 2018 Zitian Li <ztlizitian@gmail.com>
- * This program is free software. It comes without any warranty, to
- * the extent permitted by applicable law. You can redistribute it
- * and/or modify it under the terms of the Do What The Fuck You Want
- * To Public License, Version 2, as published by Sam Hocevar. See
- * http://www.wtfpl.net/ for more details.
- */
+
 #define _OSH_FS_VERSION 2018051000
 #define FUSE_USE_VERSION 26
 #include <string.h>
@@ -39,7 +32,7 @@ struct{
 
 typedef struct _header Header;
 
-printf("sizeof header is %d", sizeof(Header));
+// printf("sizeof header is %d", sizeof(Header));
 
 // 使用 块 1 (block 1) 来存放其余文件的块指针
 // block 1 is from 4096 to 8191
@@ -168,7 +161,9 @@ void block_free(header *bp){
         p->next = bp;
     freep = p;
 }
-// malloc and realloc finished ----------
+// malloc and realloc finished
+
+// fuse system calls start from here
 
 static struct filenode *get_filenode(const char *name)
 {
@@ -260,8 +255,25 @@ static int oshfs_mknod(const char *path, mode_t mode, dev_t dev)
 
 static int oshfs_open(const char *path, struct fuse_file_info *fi)
 {
-    // Not Implemented
-    return 0;
+    // int retstat = 0;
+    // int fd;
+    // char fpath[PATH_MAX];
+
+    // fullpath(fpath, path);
+    
+    // log_msg("bb_open(fpath\"%s\", fi=0x%08x)\n",
+	//     fpath,  (int) fi);
+    
+    // fd = open(fpath, fi->flags);
+    // if (fd < 0){
+    //     retstat = -1;
+    //     fprintf(stderr, "oshfs_open error!\n");
+    // }
+
+    // fi->fh = fd;
+    // log_fi(fi);
+    
+    // return retstat;
 }
 
 static int oshfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
