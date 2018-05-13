@@ -30,18 +30,57 @@ static struct filenode *root = NULL;
 
 // malloc and realloc -------------------
 
-// alignments
+// 对齐部分，按照8字节为最小单位对齐（取double的长度）
+// 这里巧妙地运用了 C 语言中 union 的语言特性来对齐
 typedef double Align;
+
 union header{
     struct{
-        union header *ptr;  //next idle block
+        union header *ptr;  // next idle block
         unsigned size;
-    };
+    }s;
     Align x;
-}
+};
+
 typedef union header Header;
 
-void* my_malloc
+static Header base;     // 链表头
+static Header *freep = NULL;        // 空闲块开头
+
+void *my_malloc(size_t nbytes){
+    Header *p, *prevp;
+    Header *my_morecore(size_t);
+    unsigned nunits;
+
+    nunits = (nbytes+sizeof(Header)-1)/sizeof(Header) + 1;  // 向上取整，以满足对齐要求
+    if ((prevp = freep) == NULL) {              // 初始化空闲块
+        base.s.ptr = freep = prevp = &base;
+        base.s.size = 0;
+    }
+    // 这里采用了“首次分配”的分配策略
+    for (p = prevp->s.ptr; ; prevp = p, p = p->s.ptr) {         // 遍历空闲块链表
+        if (p->s.size >= nunits) {          // 空闲块足够大时
+            if (p->s.size == nunits)        // 刚好一样大时
+                prevp->s.ptr = p->s.ptr;
+            else {
+                // 将该块切为两块，将尾部的新块分配出去
+                p->s.size -= nunits;
+                p += p->s.size;
+                p->s.size = nunits;
+            }
+            freep = prevp;
+            return (void *)(p+1);
+        }
+        if (p == freep) /* wrapped around free list */
+            if ((p = my_morecore(nunits)) == NULL)
+                return NULL;
+    /* none left */
+    }
+}
+
+Header  *my_morecore(size_t nu){
+    return NULL;
+}
 // malloc and realloc finished ----------
 
 static struct filenode *get_filenode(const char *name)
