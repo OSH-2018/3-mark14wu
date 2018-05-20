@@ -1,12 +1,13 @@
 
 #define _OSH_FS_VERSION 2018051000
 #define FUSE_USE_VERSION 26
+
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <fuse.h>
 #include <sys/mman.h>
-
+#define BLOCKSIZE 4096
 struct filenode {
     char *filename;
     void *content;
@@ -16,7 +17,7 @@ struct filenode {
 
 static const size_t size = 4 * 1024 * 1024 * (size_t)1024;
 static void *mem[1024 * 1024];
-static const size_t blocksize = 4096;
+static const size_t blocksize = BLOCKSIZE;
 static const size_t blocknr = size / blocksize;
 
 static struct filenode *root = NULL;
@@ -32,22 +33,23 @@ struct{
 
 typedef struct _header Header;
 
+Header _a_Header = {NULL, 0, 0, NULL};
+const size_t SizeOfHeader = sizeof(a_header);
+
 // printf("sizeof header is %d", sizeof(Header));
 
 // 使用 块 1 (block 1) 来存放其余文件的块指针
 // block 1 is from 4096 to 8191
 
-static int header_used[blocksize];
-memset(header_used, 0, sizeof(header_used));
+int header_used[BLOCKSIZE];
 
 Header *header_malloc(){
-    
     static Header *freep = (Header*)(mem + blocksize);
     Header *p;
     for (p = freep; p <= (Header*)(mem + 2 * blocksize - 1 - sizeof(Header)); p++){
-        if (!*(header_used + (void*)p - (mem + blocksize))){
+        if (!*(header_used + (int*)((void*)p - (mem + blocksize))){
             freep = p+1;
-            *(header_used + (void*)p - (mem + blocksize)) = 1;
+            *(header_used + (int*)((void*)p - (mem + blocksize))) = 1;
             return p;
         }
     }
