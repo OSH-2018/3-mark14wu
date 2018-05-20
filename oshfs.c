@@ -1,7 +1,7 @@
 
 #define _OSH_FS_VERSION 2018051000
 #define FUSE_USE_VERSION 26
-
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -24,63 +24,70 @@ static struct filenode *root = NULL;
 
 // malloc and realloc -------------------
 
-struct{
+struct _header{
     struct _header *next;  // next idle block
     int start;
     int size;
     void* content;
-}_header;
+};
 
 typedef struct _header Header;
-
-Header _a_Header = {NULL, 0, 0, NULL};
-const size_t SizeOfHeader = sizeof(a_header);
 
 // printf("sizeof header is %d", sizeof(Header));
 
 // 使用 块 1 (block 1) 来存放其余文件的块指针
 // block 1 is from 4096 to 8191
 
-int header_used[BLOCKSIZE];
+char header_used[BLOCKSIZE];
 
-Header *header_malloc(){
-    static Header *freep = (Header*)(mem + blocksize);
-    Header *p;
-    for (p = freep; p <= (Header*)(mem + 2 * blocksize - 1 - sizeof(Header)); p++){
-        if (!*(header_used + (int*)((void*)p - (mem + blocksize))){
+Header *header_malloc(){        // 我们把第一块用于存放指向块的指针
+    static void *freep = mem + blocksize; // 指向空闲块指针
+    void *p;
+    for (p = freep; p <= (void*)(mem + 2 * blocksize - 1 - sizeof(Header)); p++){
+        if (!*(header_used + (size_t)((void**)p - (mem + blocksize)))){      // 如果这一根指针没有用过
             freep = p+1;
-            *(header_used + (int*)((void*)p - (mem + blocksize))) = 1;
+            *(header_used + (size_t)((void**)p - (mem + blocksize))) = 1;    // 设置该指针为用过
+            return (Header*) p;
+        }
+    }
+    for(p = (void*)(mem + blocksize); p <= freep - 1; p++){    // 如果超过了8191，那么从4096重新开始扫描
+        if (!*(header_used + (size_t)((void**)p - (mem + blocksize)))){
+            freep = p+1;
+            *(header_used + (size_t)((void**)p - (mem + blocksize))) = 1;
             return p;
         }
     }
-    for(p = (Header*)(mem + blocksize); p <= freep - 1; p++){
-        if (!*(header_used + (void*)p - (mem + blocksize))){
-            freep = p+1;
-            *(header_used + (void*)p - (mem + blocksize)) = 1;
-            return p;
-        }
-    }
-    fprintf(stderr, "block 1 is full!\n");
+    fprintf(stderr, "块指针已满\n");
+    exit(-1);
     return NULL;
 }
 
 void header_free(Header* bp){
-    header_used[(void*)bp - (mem + blocksize)] = 0;
+    header_used[(size_t)((void**)bp - (mem + blocksize))] = 0;
     memset(bp, 0, sizeof(Header));
 }
 
 
-static Header *base = header_malloc();     // 链表头
+
 static Header *freep = NULL;        // 空闲块开头
+static Header *base = NULL;
 
 Header *block_malloc(size_t nbytes){
-    Header *p, *prevp;
-    Header *my_morecore(size_t);
-    unsigned nunits;
 
-    nblocks = (nbytes - 1) / blocksize + 1;  // 向上取整，以满足对齐要求
+    if (base == NULL)
+        base = header_malloc();     // 分配链表头
+    if (base == NULL){
+        fprintf(stderr, "空闲链表头分配失败！\n");
+        exit(-1);
+        return NULL;
+    }
+
+    Header *p, *prevp;
+    unsigned nblocks;
+
+    nblocks = (nbytes - 1) / blocksize + 1;  // 向上取整，以满足对齐要求(以block的整数倍分配空间)
     if ((prevp = freep) == NULL) {              // 初始化空闲块
-        base->next = freep = prevp = &base;
+        base->next = freep = prevp = base;
         base->start = 0;
         base->size = blocknr;
     }
@@ -91,12 +98,13 @@ Header *block_malloc(size_t nbytes){
     for (p = prevp->next; ; prevp = p, p = p->next) {         // 遍历空闲块链表
         if (p->size > max_block->size)
             max_block = p;
-        if (p->size * blocksize >= nunits) {          // 空闲块足够大时
-            if (p->size * blocksize == nunits){        // 刚好一样大时
+        if (p->size  >= nblocks) {          // 空闲块足够大时
+            if (p->size  == nblocks){        // 刚好一样大时
                 prevp->next = p->next;
                 p->next = NULL;
                 p->content = mmap(NULL, p->size * blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                 memset(p->content, 0, p->size * blocksize);
+                freep = prevp;                      // 每次寻找空闲块都从最近一次找到的空闲块开始
                 return p;
             }
             else {
@@ -105,18 +113,19 @@ Header *block_malloc(size_t nbytes){
                 Header *q = header_malloc();
                 q->start = p->start + p->size;
                 q->size = nblocks;
+                q->next = NULL;
+                q->content = mmap(NULL, q->size * blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                memset(q->content, 0, q->size * blocksize);
+                freep = prevp;
+                return q;
             }
-            freep = prevp;
-            q->next = NULL;
-            q->content = mmap(NULL, q->size * blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            memset(q->content, 0, q->size * blocksize);
-            return q;
         }
-        if (p == freep){ // 没有足够大的单独空闲块，必须分块存储
+        if (p == freep){ // 遍历整个空闲块链表都没有发现足够大的单独空闲块，必须分块存储
             p = max_block;
-            if (max_block == 0){
-                fprintf(stderr, "Not enough blocks!\n");
-                return 255;
+            if (max_block == 0){    // 空闲块已经用完了
+                fprintf(stderr, "空闲块不足！\n");
+                exit(-1);
+                return NULL;
             }
             p->content = mmap(NULL, p->size * blocksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             memset(p->content, 0, p->size * blocksize);
@@ -125,7 +134,7 @@ Header *block_malloc(size_t nbytes){
     }
 }
 
-void block_free(header *bp){
+void block_free(Header *bp){
 
     Header *p;
 
